@@ -25,3 +25,5 @@
 - Original CAN research: openDBC / comma.ai
 https://github.com/tolunaygul/IObox-emulator-haltech
 https://www.loopybunny.co.uk/CarPC/k_can.html
+https://github.com/mitchdetailed/CAN_Triple/tree/main/Projects/Haltech%20Devices/Haltech%20PD16%20A%20Emulation
+
