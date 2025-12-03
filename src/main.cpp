@@ -1,8 +1,7 @@
 #include <Arduino.h>
-#include "driver/twai.h"
+#include <driver/twai.h>
 #include <mcp_can.h>
 
-// ============================ PINS ============================
 #define LED       2
 #define CAN1_TX   GPIO_NUM_7
 #define CAN1_RX   GPIO_NUM_6
@@ -14,139 +13,111 @@
 
 MCP_CAN CAN2(CAN2_CS);
 
-// ============================ BMW IDs ============================
-#define ID_WHEEL_SPEED    0xCE    // 206 decimal — raw pulses
-#define ID_STEERING_ANGLE 0xC4    // 196 decimal
+#define ID_WHEEL_SPEED    0xCE
+#define ID_STEERING_ANGLE 0xC4
 
-// ============================ HALTECH DPI CAN IDs ============================
-constexpr uint32_t DPI1_ID      = 0x2C3;   // FL + FR
-constexpr uint32_t DPI2_ID      = 0x2C5;   // RL + RR
-constexpr uint32_t STEERING_ID  = 0x2CF;
-constexpr uint32_t KEEP_ID      = 0x2C7;
+constexpr uint32_t PD16_CONFIG_ID = 0x6D1;
+constexpr uint32_t PD16_ECR_ID    = 0x6D2;
+constexpr uint32_t PD16_TELE_ID   = 0x6D3;
+constexpr uint32_t PD16_STATUS_ID = 0x6D5;
+constexpr uint32_t STEERING_ID    = 0x2CF;
 
-// ============================ Variables ============================
-uint16_t fl_pulses = 0, fr_pulses =0, rl_pulses =0, rr_pulses =0;
-float    steering_deg = 0.0f;
+uint16_t fl_pulses = 0, fr_pulses = 0, rl_pulses = 0, rr_pulses = 0;
+uint16_t fl_prev = 0, fr_prev = 0, rl_prev = 0, rr_prev = 0;
 
-unsigned long tKeep = 0, tSend = 0, tDebug = 0, lastLed = 0;
-bool ledState = false;
-bool firstKeepSent = false;
+unsigned long tConfig = 0, tTele = 0, tStatus = 0, tEcr = 0, lastLed = 0;
 
-unsigned long bmwMsgCount = 0, lastStatsTime = 0;
+void fastBlink() { while(1) { digitalWrite(LED, !digitalRead(LED)); delay(50); } }
 
-// ============================ FAST BLINK ============================
-void fastBlink() {
-  while (1) {
-    digitalWrite(LED, HIGH); delay(50);
-    digitalWrite(LED, LOW);  delay(50);
-  }
-}
-
-// ============================ SETUP ============================
 void setup() {
   delay(8000);
   pinMode(LED, OUTPUT);
   Serial.begin(115200);
-  Serial.println(F("\n=== BMW E9x to Haltech IO12 – RAW PULSE to DPI CAN (FINAL) ==="));
+  Serial.println(F("\nPD16 EMULATOR – WORKING 2025 VERSION\n"));
 
-  // CAN1 – BMW PT-CAN
   twai_general_config_t g_cfg = TWAI_GENERAL_CONFIG_DEFAULT(CAN1_TX, CAN1_RX, TWAI_MODE_NORMAL);
   twai_timing_config_t  t_cfg = TWAI_TIMING_CONFIG_500KBITS();
   twai_filter_config_t  f_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-  if (twai_driver_install(&g_cfg, &t_cfg, &f_cfg) != ESP_OK || twai_start() != ESP_OK) {
-    Serial.println("CAN1 failed!");
-    fastBlink();
-  }
-  Serial.println("CAN1 BMW OK");
+  if (twai_driver_install(&g_cfg, &t_cfg, &f_cfg) != ESP_OK || twai_start() != ESP_OK) fastBlink();
 
-  // CAN2 – Haltech 1 Mbps
   SPI.begin(CAN2_SCK, CAN2_MISO, CAN2_MOSI, CAN2_CS);
-  if (CAN2.begin(MCP_ANY, CAN_1000KBPS, MCP_16MHZ) != CAN_OK) {
-    Serial.println("CAN2 failed!");
-    fastBlink();
-  }
+  if (CAN2.begin(MCP_ANY, CAN_1000KBPS, MCP_16MHZ) != CAN_OK) fastBlink();
   CAN2.setMode(MCP_NORMAL);
-  pinMode(CAN2_INT, INPUT_PULLUP);
-  Serial.println("CAN2 Haltech OK\n");
 
-  lastStatsTime = millis();
+  tConfig = tTele = tStatus = tEcr = millis();
 }
 
-// ============================ LOOP ============================
 void loop() {
   unsigned long now = millis();
 
-  // LED heartbeat
-  if (now - lastLed >= 250) {
-    lastLed = now;
-    ledState = !ledState;
-    digitalWrite(LED, ledState);
-  }
+  if (now - lastLed >= 250) { lastLed = now; digitalWrite(LED, !digitalRead(LED)); }
 
-  // Keep-alive
-  if (now - tKeep >= 85) {
-    tKeep = now;
-    uint8_t keep[5] = {0x10, 0x09, 0x0B, 0x01, 0x00};
-    if (CAN2.sendMsgBuf(KEEP_ID, 0, 5, keep) == CAN_OK && !firstKeepSent) {
-      Serial.println("First Keep-Alive sent – IO12 Box B online");
-      firstKeepSent = true;
-    }
-  }
-
-  // Send data every 50 ms (20 Hz)
-  if (now - tSend >= 50) {
-    tSend = now;
-
-    // Send raw BMW pulses ×10 → Haltech scales with ×0.1
-    uint16_t fl_send = fl_pulses * 10;
-    uint16_t fr_send = fr_pulses * 10;
-    uint16_t rl_send = rl_pulses * 10;
-    uint16_t rr_send = rr_pulses * 10;
-
-    uint8_t msg1[8] = {
-      lowByte(fl_send), highByte(fl_send), 0, 0,
-      lowByte(fr_send), highByte(fr_send), 0, 0
-    };
-    uint8_t msg2[8] = {
-      lowByte(rl_send), highByte(rl_send), 0, 0,
-      lowByte(rr_send), highByte(rr_send), 0, 0
-    };
-
-    CAN2.sendMsgBuf(DPI1_ID, 0, 8, msg1);
-    CAN2.sendMsgBuf(DPI2_ID, 0, 8, msg2);
-
-    // Steering angle ×10
-    int16_t steer_x10 = (int16_t)round(steering_deg * 10.0f);
-    uint8_t steer_msg[8] = {lowByte(steer_x10), highByte(steer_x10), 0,0,0,0,0,0};
-    CAN2.sendMsgBuf(STEERING_ID, 0, 8, steer_msg);
-  }
-
-  // Receive BMW messages
+  // BMW wheel pulses
   twai_message_t rx;
   while (twai_receive(&rx, 0) == ESP_OK) {
-    bmwMsgCount++;
-
     if (rx.identifier == ID_WHEEL_SPEED && rx.data_length_code == 8) {
-      fl_pulses = ((uint16_t)rx.data[0] << 8) | rx.data[1];
-      fr_pulses = ((uint16_t)rx.data[2] << 8) | rx.data[3];
-      rl_pulses = ((uint16_t)rx.data[4] << 8) | rx.data[5];
-      rr_pulses = ((uint16_t)rx.data[6] << 8) | rx.data[7];
-    }
-
-    else if (rx.identifier == ID_STEERING_ANGLE && rx.data_length_code >= 2) {
-      int16_t raw = (int16_t)((rx.data[0] << 8) | rx.data[1]);
-      steering_deg = raw * 0.04395f;
+      fl_pulses = (rx.data[0] << 8) | rx.data[1];
+      fr_pulses = (rx.data[2] << 8) | rx.data[3];
+      rl_pulses = (rx.data[4] << 8) | rx.data[5];
+      rr_pulses = (rx.data[6] << 8) | rx.data[7];
     }
   }
 
-  // Debug every 5 s
-  if (now - tDebug >= 5000) {
-    tDebug = now;
-    float elapsed = (now - lastStatsTime) / 1000.0f;
-    Serial.printf("[%.0fs] BMW %.0fHz | Steer %.1f degrees | Pulses FL:%u FR:%u RL:%u RR:%u\n",
-                  now/1000.0f, bmwMsgCount / elapsed, steering_deg,
-                  fl_pulses, fr_pulses, rl_pulses, rr_pulses);
-    bmwMsgCount = 0;
-    lastStatsTime = now;
+  // CONFIG – 2 Hz
+  if (now - tConfig >= 500) {
+    tConfig = now;
+    uint8_t cfg[8] = {0x60, 0x03, 0x00, 0x00, 0x88, 0x13, 0x01, 0x00};
+    CAN2.sendMsgBuf(PD16_CONFIG_ID, 0, 8, cfg);
+    cfg[0]++; CAN2.sendMsgBuf(PD16_CONFIG_ID, 0, 8, cfg);
+    cfg[0]++; CAN2.sendMsgBuf(PD16_CONFIG_ID, 0,8, cfg);
+    cfg[0]++; CAN2.sendMsgBuf(PD16_CONFIG_ID, 0,8, cfg);
+  }
+
+  // ECR ACK – 2 Hz
+  if (now - tEcr >= 490) {
+    tEcr = now;
+    uint8_t ack[8] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01};
+    CAN2.sendMsgBuf(PD16_ECR_ID, 0, 8, ack);
+  }
+
+  // STATUS – normal mode immediately
+  if (now - tStatus >= 500) {
+    tStatus = now;
+    uint8_t st[8] = {0x00,0x00,0x00,0x00,0x01,0x02,0x03,0x04};
+    CAN2.sendMsgBuf(PD16_STATUS_ID, 0, 8, st);
+  }
+
+  // TELEMETRY – 20 Hz – BIG-ENDIAN VOLTAGE & DUTY
+  if (now - tTele >= 50) {
+    tTele = now;
+
+    uint16_t fl_d = (fl_pulses >= fl_prev) ? fl_pulses - fl_prev : fl_pulses + 65536 - fl_prev;
+    uint16_t fr_d = (fr_pulses >= fr_prev) ? fr_pulses - fr_prev : fr_pulses + 65536 - fr_prev;
+    uint16_t rl_d = (rl_pulses >= rl_prev) ? rl_pulses - rl_prev : rl_pulses + 65536 - rl_prev;
+    uint16_t rr_d = (rr_pulses >= rr_prev) ? rr_pulses - rr_prev : rr_pulses + 65536 - rr_prev;
+
+    uint16_t fl_hz = fl_d * 20;  // 50 ms interval
+    uint16_t fr_hz = fr_d * 20;
+    uint16_t rl_hz = rl_d * 20;
+    uint16_t rr_hz = rr_d * 20;
+
+    fl_prev = fl_pulses; fr_prev = fr_pulses; rl_prev = rl_pulses; rr_prev = rr_pulses;
+
+    uint8_t tele[8] = {
+      0x60, 0x01,              // Mux + State ON
+      0x13, 0x88,              // VOLTAGE 5000 mV – BIG ENDIAN
+      0x01, 0xF4,              // DUTY 500 – BIG ENDIAN → 50.0 %
+      lowByte(fl_hz), highByte(fl_hz)   // Frequency – little-endian (as normal)
+    };
+    CAN2.sendMsgBuf(PD16_TELE_ID, 0, 8, tele);
+
+    tele[0] = 0x61; tele[6] = lowByte(fr_hz); tele[7] = highByte(fr_hz);
+    CAN2.sendMsgBuf(PD16_TELE_ID, 0, 8, tele);
+
+    tele[0] = 0x62; tele[6] = lowByte(rl_hz); tele[7] = highByte(rl_hz);
+    CAN2.sendMsgBuf(PD16_TELE_ID, 0, 8, tele);
+
+    tele[0] = 0x63; tele[6] = lowByte(rr_hz); tele[7] = highByte(rr_hz);
+    CAN2.sendMsgBuf(PD16_TELE_ID, 0, 8, tele);
   }
 }

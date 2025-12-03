@@ -24,3 +24,4 @@
 ### Credits
 - Original CAN research: openDBC / comma.ai
 https://github.com/tolunaygul/IObox-emulator-haltech
+https://www.loopybunny.co.uk/CarPC/k_can.html
