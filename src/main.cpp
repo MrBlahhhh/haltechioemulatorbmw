@@ -54,14 +54,28 @@ void loop() {
 
   // BMW wheel pulses
   twai_message_t rx;
-  while (twai_receive(&rx, 0) == ESP_OK) {
-    if (rx.identifier == ID_WHEEL_SPEED && rx.data_length_code == 8) {
-      fl_pulses = (rx.data[0] << 8) | rx.data[1];
-      fr_pulses = (rx.data[2] << 8) | rx.data[3];
-      rl_pulses = (rx.data[4] << 8) | rx.data[5];
-      rr_pulses = (rx.data[6] << 8) | rx.data[7];
-    }
+while (twai_receive(&rx, 0) == ESP_OK) {
+  if (rx.identifier == 0xCE && rx.data_length_code == 8) {
+    // These are already km/h × 16 (0.0625 km/h per LSB)
+    uint16_t fl_kph16 = (rx.data[1] << 8) | rx.data[0];  // little-endian!
+    uint16_t fr_kph16 = (rx.data[3] << 8) | rx.data[2];
+    uint16_t rl_kph16 = (rx.data[5] << 8) | rx.data[4];
+    uint16_t rr_kph16 = (rx.data[7] << 8) | rx.data[6];
+
+    // Convert to real Hz for PD16 DPI telemetry
+    // 48 pulses/rev, 275/35R18 → 2.042 m/rev → 489.7 pulses/km
+    // → Hz = (km/h × 16) / (3600 / 489.7) ≈ (km/h × 16) × 0.136
+    uint16_t fl_hz = (uint32_t)fl_kph16 * 136 / 1000;  // rounded coefficient
+    uint16_t fr_hz = (uint32_t)fr_kph16 * 136 / 1000;
+    uint16_t rl_hz = (uint32_t)rl_kph16 * 136 / 1000;
+    uint16_t rr_hz = (uint32_t)rr_kph16 * 136 / 1000;
+
+    fl_prev = fl_hz; fr_prev = fr_hz; rl_prev = rl_hz; rr_prev = rr_hz;
+    // No delta/rollover needed — just use directly
   }
+}
+
+
 
   // CONFIG – 2 Hz
   if (now - tConfig >= 500) {
